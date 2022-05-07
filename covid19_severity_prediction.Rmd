@@ -1,0 +1,336 @@
+---
+title: "Using Logistic Regression to predict COVID-19 severity."
+author: "Olusegun Adesanya"
+date: "18/12/2021"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+# output: rmdformats::material
+
+library(caret) ## data processing 
+
+library(Boruta) ## feature selection
+
+library(corpcor) ## data processing
+
+library(plotly) ## data visualization
+
+library(prettydoc) ## report theme
+
+```
+
+# 1. Data Processing
+
+### Reading the csv file and storing the datframe into covidtable: 
+
+```{r }
+
+covidtable = read.csv("C:/Users/Creacion Tech/Documents/covid_data.csv")
+
+```
+
+The line below shows the first 10 columns of the data frame.
+```{r}
+
+str(covidtable[,c(1:10)])
+
+```
+The data frame shows that all the gene sequences have numeric variables and the rest have categorical data type.
+
+### We are predicting Severity using genome sequences only. So, removing other variables from the data set.
+
+```{r }
+
+covidtable = covidtable[,-c(1:3)] 
+
+
+```
+
+### Visualizing the frequency distribution of the ICU/NonICU target variable.
+```{r , warning=FALSE, error=FALSE}
+
+fig <- plot_ly(x = covidtable$Severity, type = "histogram", color = covidtable$Severity)%>%
+  layout(title = 'Frequency of each class')
+
+fig
+
+```
+So we are able to understand the distribution of Severity values by looking at the proportion of each class.
+
+
+```{r}
+
+table(covidtable$Severity) / nrow(covidtable)
+
+```
+So, it is clearly a balanced distribution. 
+
+### Changing the Severity "ICU" to 1 and "NonICU" to 0 
+
+```{r}
+
+covidtable$Severity[covidtable$Severity == "ICU"] = 1
+
+covidtable$Severity[covidtable$Severity == "NonICU"] = 0
+
+```
+
+### Changing the data type of Severity from character to factor.
+
+```{r }
+
+covidtable$Severity = as.factor(covidtable$Severity)
+
+```
+### Normalizing the genome sequences
+Normalization is done to change the values of numeric columns in the data set to use a common scale, without distorting differences in the ranges of values or losing information.
+
+```{r}
+
+# function to normalize data
+Normalize_Data <- function(val) { return ((val - min(val)) / (max(val) - min(val))) }
+
+for (col in 2:ncol(covidtable)) { 
+  
+  covidtable[,col] = Normalize_Data(covidtable[,col])
+  
+}
+
+```
+
+
+### Removing any NAs introduced after normalization
+
+
+```{r}
+
+covidtable = covidtable[ , colSums(is.na(covidtable)) == 0]
+
+```
+
+### Analysing the independent variables
+
+
+```{r}
+
+ncol(covidtable[,-c(1)])
+
+
+```
+There are 18318 columns. So we need to select only the ones that have some correlation with the dependent variable. 
+
+### Feature selection using Boruta
+Main data frame is divided into covidtable1 and covidtable2 to avoid stack overload of the computer in feature selection function.
+
+```{r}
+
+covidtable1 = covidtable[,c(1,2:10000)]
+
+covidtable2 = covidtable[,c(1,10001:ncol(covidtable))]
+
+```
+
+Boruta() and getSelectedAttributes() is applied on covidtable1 and covidtable2 separately and features returned by the function are stored in boruta_signif1 and boruta_signif2 respectively.
+```{r}
+
+boruta_output1 <- Boruta(Severity ~ ., data=na.omit(covidtable1), doTrace=0) 
+
+boruta_signif1 <- getSelectedAttributes(boruta_output1, withTentative = TRUE)
+
+boruta_output2 <- Boruta(Severity ~ ., data=na.omit(covidtable2), doTrace=0) 
+
+boruta_signif2 <- getSelectedAttributes(boruta_output2, withTentative = TRUE)
+
+```
+
+The lists boruta_signif1 and boruta_signif2 were combined
+
+```{r}
+
+feature_selected = c(boruta_signif1,boruta_signif2)
+
+```
+
+The dataframe was filtered and only the the features which have some relation with the dependent variable were kept.
+
+```{r}
+
+covidtable = covidtable[,c("Severity",feature_selected)]
+
+
+```
+
+Boruta() and getSelectedAttributes() applied to the data; however, this time withTentative was kept false which means only the features with significant correlation with "Severity" were kept.
+
+
+```{r}
+
+boruta_output <- Boruta(Severity ~ ., data=na.omit(covidtable), doTrace=0)
+
+boruta_signif <- getSelectedAttributes(boruta_output, withTentative = FALSE)
+
+```
+
+The dataframe was filtered again and this time only the the features which have significant correlation with the dependent variable were kept.
+
+
+```{r}
+
+covidtable = covidtable[,c("Severity",boruta_signif)]
+
+```
+
+The list of the features selected was saved as a txt file.
+```{r}
+
+write.csv(names(covidtable),"featuresSelected.txt", row.names = FALSE)
+
+```
+
+The list is read from local directory and loaded into R. However the 27 shortlisted variables also failed to converge the model. Hence first 11 variables from the list were chosen. 
+
+
+```{r}
+
+featuresSelected = read.csv("featuresSelected.txt")
+
+featuresSelected = unlist(featuresSelected)
+
+featuresSelected = featuresSelected[1:12]
+
+```
+
+### List of the selected features
+
+```{r}
+
+featuresSelected
+
+```
+### Filtering the data frame using the selected features list
+
+```{r}
+
+covidtable = covidtable[,c(featuresSelected)]
+
+
+```
+Now our data is clean.
+
+# 2. Training and Tuning
+
+### Test Train division
+
+
+The seed is set which means random numbers generated each time will be same. It helps evaluate the model cause the train and test data set remains same every time. Then sample size is set to 80% of the total observation and random indexes are generated. Later, the observations with above indexes are a assigned to train set where others are assigned to test set. 
+
+```{r}
+
+set.seed(222) 
+
+sample_size = round(nrow(covidtable)*.80) 
+
+index <- sample(seq_len(nrow(covidtable)), size = sample_size)
+
+train <-covidtable[index, ]
+
+test <- covidtable[-index,]
+
+
+```
+
+### k-fold cross-validation 
+
+```{r}
+
+train.control <- trainControl(method = "cv", number = 5)
+
+
+```
+
+### Training the model
+The logistic regression model (glm) is used for training.
+
+```{r}
+
+model <- train(Severity ~., data = train, method = "glm",
+               trControl = train.control)
+
+```
+
+# 3. Model Validation
+
+```{r}
+
+model
+
+```
+The model gave 80% accuracy on the train data set which is a good proportion given that we have just 101 observations in train data set and out of which 80% are used for training the model and 20% for its validation as we are using k-fold cross-validation with k = 5.
+
+# 4. Model Interpretation
+
+```{r}
+
+summary(model)
+
+
+```
+### Coefficients
+
+
+Above shows the summary of our linear regression model. Where there is evidence of "ARG1", Severity ("ICU" versus "NonICU") increases by "6.0040". 
+
+Where there is evidence of"CDHR2", the odds of Severity increases by "7.465". 
+
+Similarly, other variables can be interpreted in a similar fashion.
+
+### Null Deviance and Residual Deviance
+The difference between the two tells us that the model is a good fit. Greater the difference better the model. Null deviance is the value when you only have intercept in your equation with no variables and Residual deviance is the value when you are taking all the variables into account. It makes sense to consider the model good if that difference is big enough. In our case "Null deviance: 139.927" and "Residual deviance:  62.551" show that our model is a good fit.
+
+### Fisher Scoring Iterations
+This is the number of iterations to fit the model. The logistic regression uses an iterative maximum likelihood algorithm to fit the data. The Fisher method is the same as fitting a model by iteratively re-weighting the least squares. It indicates the optimal number of iterations. Our model gave a "Fisher Scoring iterations: 7" which means the model was able to converge in 7 iterations.
+
+# 5. Predictions
+The steps below first predict the Severity using the test data set using the model above. Then those predictions are compared to the actual values and overall accuracy of the prediction is calculated at the end. 
+
+```{r}
+
+test$Predicted = predict(model,test[,c(2:ncol(test))])
+
+Error <- mean(test$Predicted != test$Severity)
+
+print(paste('Accuracy',round((1-Error)*100,2), "%" ) )
+
+```
+### Confusion Matrix
+A confusion matrix is a technique for summarizing the performance of a classification algorithm. Classification accuracy alone can be misleading. Calculating a confusion matrix can give a better idea of what classification model is getting right and what types of errors it is making.
+
+```{r}
+
+test$Predicted = as.factor(test$Predicted)
+
+CM <- confusionMatrix(data=test$Predicted, reference = test$Severity)
+
+CM
+
+```
+The confusion matrix above shows " Pos Pred Value : 1.0000 " and "Neg Pred Value : 0.8750" which means the model was able to predict positive, which is "1" in our case, correctly 100% of the time and negative which is "0" in our case 87% of the time. Hence our model isn't biased and is predicting both classes of data with high accuracy.
+
+### Underfitting/Overfitting
+The model gave 80% accuracy on the train data set and 92% on the test data set. This shows the mode is neither under-fitted nor over-fitted. Moreover the performance of the model could be improved if we had a larger number of observations. 
+
+# 6. Conclusion
+We predicted the Severity of a patient using his/her genome sequences. The whole process of prediction consisted of data cleaning, training the model and asses its performance. We started with over 18000 features but after following numerous steps for features selection we were left with just 11. This step helped in letting the model converge and give a reasonable accuracy for both train and test data sets. The overall performance of the model can be improved if we have a larger number of observations compared to just 126. In a nutshell, we were able to predict the severity of a patient with 92% accuracy which is quite significant number. 
+
+```{r}
+```
+
+```{r}
+```
